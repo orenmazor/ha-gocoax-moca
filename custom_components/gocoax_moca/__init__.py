@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME, Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import GoCoaxClient
-from .const import CONF_PEERS, CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
+from .const import CONF_PEERS, CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL, DOMAIN
 from .coordinator import GoCoaxConfigEntry, GoCoaxCoordinator
 
 PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.SENSOR]
@@ -28,6 +29,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoCoaxConfigEntry) -> bo
     scan_interval = entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
     coordinator = GoCoaxCoordinator(hass, entry, clients, scan_interval)
     await coordinator.async_config_entry_first_refresh()
+
+    # Das Netz-Device wird hier angelegt, nicht erst beim Hinzufuegen der
+    # Entities: Die Knoten-Devices haengen per via_device_id daran, und diese
+    # ID gibt es erst, wenn das Device existiert. HA 2026.9 hat via_device --
+    # das den Identifier-Tupel nahm und die Reihenfolge egal machte -- aus
+    # DeviceInfo entfernt.
+    network_device = dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, coordinator.network_id)},
+        name="MoCA-Netzwerk",
+        manufacturer="GoCoax",
+        model="MoCA 2.5 Netzwerk",
+    )
+    coordinator.network_device_id = network_device.id
 
     entry.runtime_data = coordinator
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))

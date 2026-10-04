@@ -17,10 +17,9 @@ class GoCoaxNetworkEntity(CoordinatorEntity[GoCoaxCoordinator]):
 
     def __init__(self, coordinator: GoCoaxCoordinator, key: str) -> None:
         super().__init__(coordinator)
-        entry_id = coordinator.config_entry.unique_id or coordinator.config_entry.entry_id
-        self._attr_unique_id = f"net_{entry_id}_{key}"
+        self._attr_unique_id = f"{coordinator.network_id}_{key}"
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, f"net_{entry_id}")},
+            identifiers={(DOMAIN, coordinator.network_id)},
             name="MoCA-Netzwerk",
             manufacturer="GoCoax",
             model="MoCA 2.5 Netzwerk",
@@ -40,7 +39,6 @@ class GoCoaxNodeEntity(CoordinatorEntity[GoCoaxCoordinator]):
         super().__init__(coordinator)
         self._mac = mac
         self._attr_unique_id = f"{mac}_{key}"
-        entry_id = coordinator.config_entry.unique_id or coordinator.config_entry.entry_id
         node = coordinator.data.nodes[mac]
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, mac)},
@@ -48,8 +46,12 @@ class GoCoaxNodeEntity(CoordinatorEntity[GoCoaxCoordinator]):
             name=f"MoCA-Adapter {node.mac_pretty}",
             manufacturer="GoCoax",
             model="MXL371x",
-            via_device=(DOMAIN, f"net_{entry_id}"),
         )
+        # Nur setzen, wenn die ID bekannt ist: ein None-Wert wuerde als
+        # "kein Parent" durchgereicht und das Device waere flach statt
+        # fehlerhaft -- aber ein fehlender Key ist der ehrlichere Zustand.
+        if coordinator.network_device_id is not None:
+            self._attr_device_info["via_device_id"] = coordinator.network_device_id
 
     @property
     def node(self) -> MocaNode | None:

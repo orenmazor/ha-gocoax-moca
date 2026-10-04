@@ -70,6 +70,16 @@ class GoCoaxCoordinator(DataUpdateCoordinator[MocaNetwork]):
         # Ethernet-Zaehler dem richtigen Knoten-Device zu.
         self._host_macs: dict[str, str] = {}
         self._primary: GoCoaxClient = clients[0]
+        # Registry-ID des Netz-Devices. Wird in async_setup_entry gesetzt,
+        # sobald das Device existiert -- via_device_id braucht die echte ID,
+        # nicht den Identifier-Tupel.
+        self.network_device_id: str | None = None
+
+    @property
+    def network_id(self) -> str:
+        """Identifier des Service-Devices, das fuer das Netz als Ganzes steht."""
+        entry = self.config_entry
+        return f"net_{entry.unique_id or entry.entry_id}"
 
     async def _async_setup(self) -> None:
         """Einmalige Stammdaten.
