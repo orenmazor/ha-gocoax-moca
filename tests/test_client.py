@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 import pytest
 from aiohttp import ClientSession, web
-from api import GoCoaxAuthError, GoCoaxClient, GoCoaxCsrfError
+from api import GoCoaxAuthError, GoCoaxClient, GoCoaxCsrfError, GoCoaxError
 from api.registers import READ_REGISTERS
 
 PAYLOAD = '{\n"data":["0x00000000","0x00000001"]\n}'
@@ -29,6 +29,7 @@ class FakeAdapter:
     # Antwortcodes fuer aufeinanderfolgende POSTs; danach immer 200.
     post_statuses: list[int] = field(default_factory=list)
     require_valid_token: bool = True
+    body: str = PAYLOAD
 
     get_calls: int = 0
     post_calls: int = 0
@@ -60,7 +61,7 @@ class FakeAdapter:
                 return web.Response(status=400, text="")
 
         return web.Response(
-            status=200, text=PAYLOAD, content_type="application/json"
+            status=200, text=self.body, content_type="application/json"
         )
 
 
@@ -124,6 +125,23 @@ async def test_400_after_refresh_raises(client, adapter):
     with pytest.raises(GoCoaxCsrfError):
         await client.async_local_info()
     assert adapter.post_calls == 2  # genau ein Retry, kein Dauerschleifen
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # Truncated mid-array, the shape seen from a real adapter.
+        '{\n"data":["0x00000000","0x0000',
+        '{"nodata":[]}',
+        '{"data":["not-hex"]}',
+    ],
+)
+async def test_garbled_body_raises_gocoax_error(client, adapter, body):
+    """A bad body must surface as GoCoaxError, not an uncaught ValueError."""
+    adapter.body = body
+
+    with pytest.raises(GoCoaxError):
+        await client.async_local_info()
 
 
 async def test_401_on_post_raises_auth_error(client, adapter):

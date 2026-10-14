@@ -20,7 +20,7 @@ import logging
 
 from aiohttp import ClientSession, ClientTimeout
 
-from .exceptions import GoCoaxAuthError, GoCoaxCsrfError
+from .exceptions import GoCoaxAuthError, GoCoaxCsrfError, GoCoaxError
 from .registers import READ_REGISTERS
 
 _LOGGER = logging.getLogger(__name__)
@@ -109,8 +109,17 @@ class GoCoaxClient:
                             f"{self._base}{path}: 400 auch nach Token-Refresh"
                         )
                     resp.raise_for_status()
-                    payload = await resp.json()
-                return [int(word, 16) for word in payload["data"]]
+                    # The adapter occasionally returns a garbled body (seen in HA as
+                    # "orjson.JSONDecodeError: unexpected character: line 2 column
+                    # 529"). Report it as a GoCoaxError so callers treat it like
+                    # any other failed read instead of failing the whole poll.
+                    try:
+                        payload = await resp.json()
+                        return [int(word, 16) for word in payload["data"]]
+                    except (ValueError, KeyError, TypeError) as err:
+                        raise GoCoaxError(
+                            f"{self._base}{path}: unreadable response: {err}"
+                        ) from err
 
         raise AssertionError("unerreichbar")  # pragma: no cover
 
