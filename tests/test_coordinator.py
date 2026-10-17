@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 from aiohttp import ClientError
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -10,7 +12,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.gocoax_moca.api import GoCoaxAuthError, GoCoaxError
 from custom_components.gocoax_moca.const import DOMAIN
-from custom_components.gocoax_moca.coordinator import GoCoaxCoordinator
+from custom_components.gocoax_moca.coordinator import AUTH_GRACE, GoCoaxCoordinator
 
 from .conftest import MAC_A, MAC_B, FakeClient  # noqa: F401
 
@@ -90,13 +92,54 @@ async def test_all_adapters_dead_raises_update_failed(hass):
         await coordinator._async_update_data()
 
 
-async def test_auth_error_triggers_reauth(hass):
-    """401 ist kein transienter Fehler -- es muss den Reauth-Flow ausloesen."""
+async def test_auth_error_is_retried_within_grace(hass, freezer):
+    """Adapters reject good credentials for a while after booting."""
     a = FakeClient("192.0.2.10", MAC_A, fail=GoCoaxAuthError("401"))
     coordinator = GoCoaxCoordinator(hass, _entry(hass), [a], 30)
 
+    with pytest.raises(UpdateFailed):
+        await coordinator._async_update_data()
+    freezer.tick(AUTH_GRACE - timedelta(minutes=1))
+    with pytest.raises(UpdateFailed):
+        await coordinator._async_update_data()
+
+
+async def test_auth_error_triggers_reauth_after_grace(hass, freezer):
+    a = FakeClient("192.0.2.10", MAC_A, fail=GoCoaxAuthError("401"))
+    coordinator = GoCoaxCoordinator(hass, _entry(hass), [a], 30)
+
+    with pytest.raises(UpdateFailed):
+        await coordinator._async_update_data()
+    freezer.tick(AUTH_GRACE)
     with pytest.raises(ConfigEntryAuthFailed):
         await coordinator._async_update_data()
+
+
+async def test_successful_poll_resets_auth_grace(hass, freezer):
+    a = FakeClient("192.0.2.10", MAC_A, fail=GoCoaxAuthError("401"))
+    coordinator = GoCoaxCoordinator(hass, _entry(hass), [a], 30)
+
+    with pytest.raises(UpdateFailed):
+        await coordinator._async_update_data()
+    freezer.tick(timedelta(minutes=50))
+    a.fail = None
+    await coordinator._async_update_data()
+
+    # A new run of 401s starts its own grace period.
+    a.fail = GoCoaxAuthError("401")
+    freezer.tick(timedelta(minutes=50))
+    with pytest.raises(UpdateFailed):
+        await coordinator._async_update_data()
+
+
+async def test_auth_error_on_one_adapter_fails_over(hass):
+    a = FakeClient("192.0.2.10", MAC_A, fail=GoCoaxAuthError("401"))
+    b = FakeClient("192.0.2.11", MAC_B)
+    coordinator = GoCoaxCoordinator(hass, _entry(hass), [a, b], 30)
+
+    network = await coordinator._async_update_data()
+
+    assert network.nodes
 
 
 async def test_unreachable_peer_at_setup_does_not_block(hass):

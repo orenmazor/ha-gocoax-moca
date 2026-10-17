@@ -8,7 +8,7 @@ netzwerkweit. Nur die Ethernet-Zaehler (0x14) sind pro Adapter verschieden.
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from aiohttp import ClientError
 from homeassistant.config_entries import ConfigEntry
@@ -16,6 +16,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .api import GoCoaxAuthError, GoCoaxClient, GoCoaxError
 from .api.decode import (
@@ -42,6 +43,12 @@ from .api.fmr import compute_phy_rates
 from .models import LocalStats, MocaNetwork, MocaNode
 
 _LOGGER = logging.getLogger(__name__)
+
+# How long 401s must persist before we ask the user to re-enter the password.
+# After a power cut the adapters reject correct credentials for a while (about
+# 30 minutes observed) while they boot. Giving up on the first 401 left the
+# integration dead until someone reloaded it by hand.
+AUTH_GRACE = timedelta(hours=1)
 
 type GoCoaxConfigEntry = ConfigEntry[GoCoaxCoordinator]
 
@@ -74,6 +81,8 @@ class GoCoaxCoordinator(DataUpdateCoordinator[MocaNetwork]):
         # sobald das Device existiert -- via_device_id braucht die echte ID,
         # nicht den Identifier-Tupel.
         self.network_device_id: str | None = None
+        # When the current run of 401s started; None while auth is working.
+        self._auth_failing_since: datetime | None = None
 
     @property
     def network_id(self) -> str:
@@ -91,7 +100,12 @@ class GoCoaxCoordinator(DataUpdateCoordinator[MocaNetwork]):
             try:
                 words = await client.async_own_mac()
             except GoCoaxAuthError as err:
-                raise ConfigEntryAuthFailed(str(err)) from err
+                # Retry the whole setup rather than continuing without this
+                # adapter's MAC: host MACs are only read here, so skipping it
+                # would lose its counters until the next reload. HA turns
+                # UpdateFailed during the first refresh into ConfigEntryNotReady
+                # and retries with backoff.
+                raise UpdateFailed(str(err)) from err
             except (GoCoaxError, ClientError, TimeoutError) as err:
                 # Ein beim Setup nicht erreichbarer Peer darf die Integration
                 # nicht blockieren -- seine Zaehler fehlen dann eben.
@@ -109,14 +123,17 @@ class GoCoaxCoordinator(DataUpdateCoordinator[MocaNetwork]):
 
     async def _async_update_data(self) -> MocaNetwork:
         last_exc: Exception | None = None
+        auth_err: GoCoaxAuthError | None = None
         network: MocaNetwork | None = None
 
         for client in self._ordered_clients():
             try:
                 network = await self._fetch_network(client)
             except GoCoaxAuthError as err:
-                # Falsche Zugangsdaten sind kein transienter Fehler -> Reauth.
-                raise ConfigEntryAuthFailed(str(err)) from err
+                # Try the other adapter: the two boot independently.
+                auth_err = last_exc = err
+                _LOGGER.debug("Netzdaten von %s: %s", client.host, err)
+                continue
             except (GoCoaxError, ClientError, TimeoutError, IndexError, KeyError) as err:
                 last_exc = err
                 _LOGGER.debug("Netzdaten von %s fehlgeschlagen: %s", client.host, err)
@@ -125,7 +142,11 @@ class GoCoaxCoordinator(DataUpdateCoordinator[MocaNetwork]):
             break
 
         if network is None:
+            if auth_err is not None:
+                self._check_auth_grace(auth_err)
             raise UpdateFailed(f"kein Adapter erreichbar: {last_exc}")
+
+        self._auth_failing_since = None
 
         return await self._add_local_stats(network)
 
@@ -200,9 +221,10 @@ class GoCoaxCoordinator(DataUpdateCoordinator[MocaNetwork]):
                 continue
             try:
                 words = await client.async_frame_info()
-            except GoCoaxAuthError as err:
-                raise ConfigEntryAuthFailed(str(err)) from err
             except (GoCoaxError, ClientError, TimeoutError, IndexError) as err:
+                # GoCoaxAuthError lands here too: one adapter's counters are
+                # best effort, and persistent 401s are caught by the network
+                # poll above.
                 _LOGGER.debug("Zaehler von %s nicht lesbar: %s", client.host, err)
                 network.unreachable.add(mac)
                 continue
@@ -225,6 +247,14 @@ class GoCoaxCoordinator(DataUpdateCoordinator[MocaNetwork]):
                 ),
             )
         return network
+
+    def _check_auth_grace(self, err: GoCoaxAuthError) -> None:
+        """Escalate to reauth only once 401s have lasted longer than AUTH_GRACE."""
+        now = dt_util.utcnow()
+        if self._auth_failing_since is None:
+            self._auth_failing_since = now
+        if now - self._auth_failing_since >= AUTH_GRACE:
+            raise ConfigEntryAuthFailed(str(err)) from err
 
     @property
     def host_macs(self) -> dict[str, str]:
