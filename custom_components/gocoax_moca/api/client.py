@@ -6,8 +6,9 @@ Aufrufkonvention (am Geraet verifiziert):
     POST /ms/<iface>/<register>   Body: {"data":[...]}   ->  {"data":["0x..", ..]}
 
 - HTTP Basic Auth, ohne -> 401
-- CSRF: GET /devStatus.html liefert Set-Cookie csrf_token. Jedes POST braucht
-  Cookie UND Header X-CSRF-TOKEN -- eines allein -> 400.
+- CSRF: GET /devStatus.html (GoCoax) bzw. / (Symarix TMU 31) liefert Set-Cookie
+  csrf_token. Jedes POST braucht Cookie UND Header X-CSRF-TOKEN -- eines allein
+  -> 400.
 - Request-Content-Type muss x-www-form-urlencoded sein, obwohl der Body JSON ist.
 """
 
@@ -18,7 +19,12 @@ import base64
 import json
 import logging
 
-from aiohttp import ClientSession, ClientTimeout
+from aiohttp import (
+    ClientResponseError,
+    ClientSession,
+    ClientTimeout,
+    ServerDisconnectedError,
+)
 
 from .exceptions import GoCoaxAuthError, GoCoaxCsrfError, GoCoaxError
 from .registers import READ_REGISTERS
@@ -26,6 +32,12 @@ from .registers import READ_REGISTERS
 _LOGGER = logging.getLogger(__name__)
 
 _TIMEOUT = ClientTimeout(total=10)
+
+# Pages that may set the csrf_token cookie, tried in this order. GoCoax firmware
+# serves /devStatus.html. The Symarix TMU 31 (same MXL371x API) has a single-page
+# UI at "/" and answers /devStatus.html with a bare "HTTP/1.1 404" status line,
+# no headers, then closes -- aiohttp raises that as ServerDisconnectedError.
+_TOKEN_PAGES = ("/devStatus.html", "/")
 
 
 class GoCoaxClient:
@@ -47,6 +59,8 @@ class GoCoaxClient:
         token = base64.b64encode(f"{username}:{password}".encode()).decode()
         self._auth_header = {"Authorization": f"Basic {token}"}
         self._csrf: str | None = None
+        # Page that last yielded a token; tried first so a refresh is one GET.
+        self._token_page: str | None = None
         # Serialisiert alle Requests dieses Hosts. Liefen sie parallel, wuerde ein
         # rotiertes Token zu mehreren gleichzeitigen Refreshes fuehren, die sich
         # gegenseitig entwerten.
@@ -58,8 +72,31 @@ class GoCoaxClient:
         Das Token rotiert, sobald parallel jemand das Web-UI oeffnet -- deshalb
         ist das kein reiner Setup-Schritt, sondern auch der Retry-Pfad.
         """
+        pages = list(_TOKEN_PAGES)
+        if self._token_page is not None:
+            pages.remove(self._token_page)
+            pages.insert(0, self._token_page)
+
+        failures: list[str] = []
+        for page in pages:
+            try:
+                self._csrf = await self._fetch_token(page)
+            except (ClientResponseError, ServerDisconnectedError, GoCoaxCsrfError) as err:
+                # This page does not hand out a token on this firmware -- try the
+                # next one. Auth errors and timeouts are not caught here.
+                failures.append(f"{page}: {type(err).__name__}: {err}")
+                continue
+            self._token_page = page
+            return
+        self._token_page = None
+        raise GoCoaxCsrfError(
+            f"{self._base}: kein csrf_token ({'; '.join(failures)})"
+        )
+
+    async def _fetch_token(self, page: str) -> str:
+        """GET einer Seite, liefert den csrf_token aus dem Set-Cookie."""
         async with self._session.get(
-            f"{self._base}/devStatus.html",
+            f"{self._base}{page}",
             headers=self._auth_header,
             timeout=_TIMEOUT,
         ) as resp:
@@ -71,9 +108,8 @@ class GoCoaxClient:
             # aiohttp speichert Cookies fuer nackte IP-Hosts nur mit unsafe=True.
             for morsel in resp.cookies.values():
                 if morsel.key == "csrf_token":
-                    self._csrf = morsel.value
-                    return
-        raise GoCoaxCsrfError(f"{self._base}: kein csrf_token im Set-Cookie")
+                    return morsel.value
+        raise GoCoaxCsrfError(f"{self._base}{page}: kein csrf_token im Set-Cookie")
 
     async def _post(self, key: str, data: list[int] | None = None) -> list[int]:
         """Liest ein Register aus der Allowlist."""
