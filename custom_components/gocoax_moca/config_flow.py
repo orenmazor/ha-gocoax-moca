@@ -97,7 +97,10 @@ class GoCoaxConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
             except GoCoaxAuthError:
                 errors["base"] = "invalid_auth"
-            except (GoCoaxError, ClientError, TimeoutError):
+            except (GoCoaxError, ClientError, TimeoutError) as err:
+                # %s, not %r: the repr of aiohttp errors carries the request headers,
+                # including the Basic-Auth credentials.
+                _LOGGER.warning("Adapter not reachable: %s: %s", type(err).__name__, err)
                 errors["base"] = "cannot_connect"
             except (IndexError, KeyError, ValueError):
                 _LOGGER.exception("Unerwartete Antwort von %s", user_input[CONF_HOST])
@@ -173,7 +176,10 @@ class GoCoaxConfigFlow(ConfigFlow, domain=DOMAIN):
                 except GoCoaxAuthError:
                     errors["base"] = "invalid_auth"
                     break
-                except (GoCoaxError, ClientError, TimeoutError):
+                except (GoCoaxError, ClientError, TimeoutError) as err:
+                    # %s, not %r: the repr of aiohttp errors carries the request headers,
+                    # including the Basic-Auth credentials.
+                    _LOGGER.warning("Adapter not reachable: %s: %s", type(err).__name__, err)
                     errors["base"] = "cannot_connect"
                     break
                 # Eine vertippte IP wuerde sonst die Ethernet-Zaehler eines
@@ -224,7 +230,10 @@ class GoCoaxConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
             except GoCoaxAuthError:
                 errors["base"] = "invalid_auth"
-            except (GoCoaxError, ClientError, TimeoutError):
+            except (GoCoaxError, ClientError, TimeoutError) as err:
+                # %s, not %r: the repr of aiohttp errors carries the request headers,
+                # including the Basic-Auth credentials.
+                _LOGGER.warning("Adapter not reachable: %s: %s", type(err).__name__, err)
                 errors["base"] = "cannot_connect"
             else:
                 return self.async_update_reload_and_abort(
@@ -259,7 +268,10 @@ class GoCoaxConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
             except GoCoaxAuthError:
                 errors["base"] = "invalid_auth"
-            except (GoCoaxError, ClientError, TimeoutError):
+            except (GoCoaxError, ClientError, TimeoutError) as err:
+                # %s, not %r: the repr of aiohttp errors carries the request headers,
+                # including the Basic-Auth credentials.
+                _LOGGER.warning("Adapter not reachable: %s: %s", type(err).__name__, err)
                 errors["base"] = "cannot_connect"
             else:
                 if info["own_mac"] != entry.unique_id:
@@ -313,7 +325,10 @@ class GoCoaxOptionsFlow(OptionsFlow):
                 except GoCoaxAuthError:
                     errors["base"] = "invalid_auth"
                     break
-                except (GoCoaxError, ClientError, TimeoutError):
+                except (GoCoaxError, ClientError, TimeoutError) as err:
+                    # %s, not %r: the repr of aiohttp errors carries the request headers,
+                    # including the Basic-Auth credentials.
+                    _LOGGER.warning("Adapter not reachable: %s: %s", type(err).__name__, err)
                     errors["base"] = "cannot_connect"
                     break
                 if info["own_mac"] != mac:

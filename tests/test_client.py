@@ -189,3 +189,72 @@ async def test_unknown_register_key_is_rejected(client):
     """Kein frei waehlbarer Pfad -- unbekannte Schluessel scheitern hart."""
     with pytest.raises(KeyError):
         await client._post("reboot")
+
+
+async def test_root_page_fallback_and_cached_page(adapter, aiohttp_server):
+    """Symarix TMU 31: no /devStatus.html, the cookie comes from "/". After the
+    first refresh the working page is remembered, so a token rotation costs one
+    GET instead of first hitting the missing page again."""
+    missing_hits = 0
+
+    async def missing(request: web.Request) -> web.Response:
+        nonlocal missing_hits
+        missing_hits += 1
+        return web.Response(status=404)
+
+    app = web.Application()
+    app.router.add_get("/devStatus.html", missing)
+    app.router.add_get("/", adapter.handle_status)
+    app.router.add_post("/ms/0/0x15", adapter.handle_post)
+    server = await aiohttp_server(app)
+
+    adapter.post_statuses = [200, 400]  # second call sees a rotated token
+    async with ClientSession() as session:
+        client = GoCoaxClient(session, f"{server.host}:{server.port}", "admin", "x")
+        assert await client.async_local_info() == [0, 1]
+        assert await client.async_local_info() == [0, 1]
+
+    assert missing_hits == 1
+    assert adapter.get_calls == 2
+
+
+async def test_headerless_404_then_close_falls_back_to_root(adapter):
+    """The TMU 31 answers /devStatus.html with a bare status line and closes the
+    connection; aiohttp raises ServerDisconnectedError. That must fall through to
+    "/" and the token from there must be sent on the POST."""
+    paths: list[bytes] = []
+    posts: list[bytes] = []
+
+    async def handler(reader, writer):
+        head = await reader.readuntil(b"\r\n\r\n")
+        paths.append(head.split(b" ", 2)[1])
+        if head.startswith(b"GET / "):
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Set-Cookie: csrf_token=TOKEN-1; SameSite=Strict;\r\n"
+                b"Content-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+        elif head.startswith(b"POST "):
+            posts.append(head)
+            length = int(head.lower().split(b"content-length: ")[1].split(b"\r\n")[0])
+            await reader.readexactly(length)
+            body = PAYLOAD.encode()
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
+                + body
+            )
+        else:
+            writer.write(b"HTTP/1.1 404 Page file not found\r\n\r\n")
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    async with server, ClientSession() as session:
+        client = GoCoaxClient(session, f"127.0.0.1:{port}", "admin", "x")
+        assert await client.async_local_info() == [0, 1]
+
+    assert paths[:2] == [b"/devStatus.html", b"/"]
+    assert b"X-CSRF-TOKEN: TOKEN-1" in posts[0]
+    assert b"csrf_token=TOKEN-1" in posts[0]
